@@ -60,31 +60,48 @@ jokes = [
     "What do you call a sleeping dinosaur? A dino-snore!"
 ]
 
+EXPECTED_JOKE_COUNT = 50
+
 try:
     conn = mysql.connector.connect(**db_config)
     cursor = conn.cursor()
 
-    # Create table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS jokes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            text TEXT NOT NULL
-        )
-    ''')
+    # Check if table exists and count jokes
+    cursor.execute("SHOW TABLES LIKE 'jokes'")
+    table_exists = cursor.fetchone() is not None
 
-    # Check if jokes already exist
-    cursor.execute("SELECT COUNT(*) FROM jokes")
-    count = cursor.fetchone()[0]
+    should_initialize = False
 
-    if count == 0:
+    if table_exists:
+        cursor.execute("SELECT COUNT(*) FROM jokes")
+        count = cursor.fetchone()[0]
+
+        if count != EXPECTED_JOKE_COUNT:
+            print(f"⚠️  Found {count} jokes, but expected {EXPECTED_JOKE_COUNT}.")
+            print("🗑️  Dropping table and reinitializing...")
+            cursor.execute("DROP TABLE jokes")
+            should_initialize = True
+        else:
+            print(f"✅ Database already contains {count} jokes. No action needed.")
+    else:
+        print("📋 Table 'jokes' does not exist. Creating and initializing...")
+        should_initialize = True
+
+    if should_initialize:
+        # Create table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS jokes (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                text TEXT NOT NULL
+            )
+        ''')
+
         # Insert jokes
         for joke in jokes:
             cursor.execute("INSERT INTO jokes (text) VALUES (%s)", (joke,))
 
         conn.commit()
         print(f"✅ Successfully inserted {len(jokes)} jokes into the database!")
-    else:
-        print(f"ℹ️  Database already contains {count} jokes. Skipping insertion.")
 
     cursor.close()
     conn.close()
