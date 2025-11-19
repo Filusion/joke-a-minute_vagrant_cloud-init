@@ -1,0 +1,24 @@
+Vagrant.configure("2") do |config|
+  # Use Ubuntu 22.04 LTS
+  config.vm.box = "ubuntu/jammy64"
+  
+  # Set hostname
+  config.vm.hostname = "joke-app-vm"
+  
+  # Sync the entire project folder
+  config.vm.synced_folder "../..", "/project"
+  
+  # Forward standard HTTP/HTTPS ports
+  config.vm.network "forwarded_port", guest: 443, host: 443, host_ip: "0.0.0.0"
+  config.vm.network "forwarded_port", guest: 80, host: 80, host_ip: "0.0.0.0"
+  
+  # VirtualBox provider settings
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "joke-app-vm"
+    vb.memory = "2048"
+    vb.cpus = 2
+  end
+  
+  # Provision with shell script
+  config.vm.provision "shell", path: "provision.sh"
+end
