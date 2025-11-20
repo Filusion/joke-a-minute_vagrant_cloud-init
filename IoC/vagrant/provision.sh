@@ -1,19 +1,20 @@
 #!/bin/bash
 set -e
 
-DOMAIN="devops-vm-20.lrk.si"
-EMAIL="admin@devops-vm-20.lrk.si"  # Change this to your actual email
-
-echo "=== Starting Joke App Provisioning ==="
+echo "========================================="
+echo "   Starting Joke App Provisioning"
+echo "========================================="
+echo ""
 
 # Update system
 echo ">>> Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get upgrade -y
 
 # Install MySQL
 echo ">>> Installing MySQL..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+apt-get install -y mysql-server
 systemctl start mysql
 systemctl enable mysql
 
@@ -27,13 +28,9 @@ systemctl enable redis-server
 echo ">>> Installing Python..."
 apt-get install -y python3 python3-pip python3-venv
 
-# Install Nginx
+# Install Nginx (for internal use)
 echo ">>> Installing Nginx..."
 apt-get install -y nginx
-
-# Install Certbot for Let's Encrypt
-echo ">>> Installing Certbot..."
-apt-get install -y certbot python3-certbot-nginx
 
 # Create app directory
 echo ">>> Setting up application..."
@@ -41,11 +38,14 @@ mkdir -p /opt/joke-app
 cp -r /project/app/* /opt/joke-app/
 
 # Create virtual environment and install dependencies
+echo ">>> Installing Python dependencies..."
 cd /opt/joke-app
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install gunicorn
+deactivate
 
 # Configure MySQL database
 echo ">>> Configuring MySQL database..."
@@ -58,11 +58,13 @@ MYSQL_SCRIPT
 
 # Initialize database with jokes
 echo ">>> Initializing database..."
+source /opt/joke-app/venv/bin/activate
 python3 init_db.py
+deactivate
 
 # Create systemd service for Flask app
 echo ">>> Creating Flask service..."
-cat > /etc/systemd/system/joke-app.service <<SERVICE
+cat > /etc/systemd/system/joke-app.service <<'SERVICE'
 [Unit]
 Description=Joke-a-Minute Flask Application
 After=network.target mysql.service redis-server.service
@@ -71,47 +73,71 @@ After=network.target mysql.service redis-server.service
 User=root
 WorkingDirectory=/opt/joke-app
 Environment="PATH=/opt/joke-app/venv/bin"
-ExecStart=/opt/joke-app/venv/bin/python3 /opt/joke-app/app.py
+ExecStart=/opt/joke-app/venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 2 app:app
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 SERVICE
 
 # Start Flask app
+echo ">>> Starting Flask application..."
 systemctl daemon-reload
 systemctl start joke-app
 systemctl enable joke-app
 
-# Configure Nginx (temporary HTTP config for Let's Encrypt)
+# Wait for Flask to start
+sleep 5
+
+# Check if Flask is running
+if systemctl is-active --quiet joke-app; then
+    echo "✓ Flask app started successfully"
+else
+    echo "✗ Flask app failed to start"
+    systemctl status joke-app
+    exit 1
+fi
+
+# Configure Nginx as reverse proxy
 echo ">>> Configuring Nginx..."
-cat > /etc/nginx/sites-available/joke-app <<NGINX
+cat > /etc/nginx/sites-available/joke-app <<'NGINX_CONFIG'
 server {
     listen 80;
-    server_name $DOMAIN;
+    server_name _;
 
     location / {
         proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-NGINX
+NGINX_CONFIG
 
 ln -sf /etc/nginx/sites-available/joke-app /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 
-# Test and reload Nginx
 nginx -t
-systemctl reload nginx
+systemctl restart nginx
 
-# Get Let's Encrypt certificate
-echo ">>> Obtaining Let's Encrypt certificate..."
-certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect
-
-echo "=== Provisioning Complete! ==="
-echo "Access the app at:"
-echo "  - https://$DOMAIN (Trusted HTTPS with Let's Encrypt)"
-echo "  - http://$DOMAIN (redirects to HTTPS)"
+echo ""
+echo "========================================="
+echo "   VM Provisioning Complete!"
+echo "========================================="
+echo ""
+echo "✅ All services running in VM!"
+echo ""
+echo "Service Status:"
+echo "  MySQL:       $(systemctl is-active mysql)"
+echo "  Redis:       $(systemctl is-active redis-server)"
+echo "  Flask App:   $(systemctl is-active joke-app)"
+echo "  Nginx:       $(systemctl is-active nginx)"
+echo ""
+echo "VM is accessible at:"
+echo "  - http://localhost:8080 (from HOST)"
+echo "  - http://localhost:5000 (direct Flask access)"
+echo ""
+echo "========================================="
