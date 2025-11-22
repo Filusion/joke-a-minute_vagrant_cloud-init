@@ -1,69 +1,155 @@
 #!/bin/bash
+
+# =============================================================================
+# Joke-a-Minute Vagrant Provisioning Script
+# =============================================================================
+# This script automatically installs and configures all components needed for
+# the Joke-a-Minute application inside the Vagrant VM
+#
+# Components installed:
+#   - MySQL 8.0 (database for jokes storage)
+#   - Redis (caching layer for performance)
+#   - Python 3 + pip + venv (application runtime)
+#   - Nginx (reverse proxy and web server)
+#   - Flask + Gunicorn (Python web application)
+#
+# Exit on any error
+
 set -e
 
 echo "========================================="
 echo "   Starting Joke App Provisioning"
 echo "========================================="
+echo "Starting at: $(date)"
 echo ""
 
 # Update system
-echo ">>> Updating system packages..."
+# =============================================================================
+# System Update
+# =============================================================================
+echo ">>> [1/9]  Updating system packages..."
+echo "  → Running apt-get update to refresh package lists"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+echo "  → Running apt-get upgrade to update installed packages"
 apt-get upgrade -y
+echo "  ✓ System packages updated"
+echo ""
 
 # Install MySQL
-echo ">>> Installing MySQL..."
+# =============================================================================
+# MySQL Installation
+# =============================================================================
+echo ">>> [2/9] Installing MySQL..."
+echo "  → Installing mysql-server package"
 apt-get install -y mysql-server
+echo "  → Starting MySQL service"
 systemctl start mysql
+echo "  → Enabling MySQL to start on boot"
 systemctl enable mysql
+echo "  ✓ MySQL installed and running"
+echo ""
 
 # Install Redis
-echo ">>> Installing Redis..."
+# =============================================================================
+# Redis Installation
+# =============================================================================
+echo ">>> [3/9] Installing Redis..."
+echo "  → Installing redis-server package"
 apt-get install -y redis-server
+echo "  → Starting Redis service"
 systemctl start redis-server
+echo "  → Enabling Redis to start on boot"
 systemctl enable redis-server
+echo "  ✓ Redis installed and running"
+echo ""
 
 # Install Python and pip
-echo ">>> Installing Python..."
+# =============================================================================
+# Python Installation
+# =============================================================================
+echo ">>> [4/9] Installing Python..."
+echo "  → Installing python3, pip, and venv"
 apt-get install -y python3 python3-pip python3-venv
+echo "  ✓ Python environment ready"
+echo ""
 
+# =============================================================================
+# Nginx Installation
+# =============================================================================
 # Install Nginx (for internal use)
-echo ">>> Installing Nginx..."
+echo ">>> [5/9] Installing Nginx..."
+echo "  → Installing nginx package"
 apt-get install -y nginx
+echo "  ✓ Nginx installed"
+echo ""
 
+# =============================================================================
+# Application Setup
+# =============================================================================
 # Create app directory
-echo ">>> Setting up application..."
+echo ">>> [6/9] Setting up application..."
+echo "  → Creating /opt/joke-app directory"
 mkdir -p /opt/joke-app
+echo "  → Copying application files from /project/app/"
 cp -r /project/app/* /opt/joke-app/
 
 # Create virtual environment and install dependencies
-echo ">>> Installing Python dependencies..."
+echo "  → Creating Python virtual environment"
 cd /opt/joke-app
 python3 -m venv venv
+echo "  → Activating virtual environment"
 source venv/bin/activate
+echo "  → Upgrading pip to latest version"
 pip install --upgrade pip
+echo "  → Installing Python dependencies from requirements.txt"
 pip install -r requirements.txt
+echo "  → Installing Gunicorn (production WSGI server)"
 pip install gunicorn
+echo "  → Deactivating virtual environment"
 deactivate
 
+echo "  ✓ Application files configured"
+echo ""
+
+# =============================================================================
+# MySQL Database Configuration
+# =============================================================================
 # Configure MySQL database
-echo ">>> Configuring MySQL database..."
+echo ">>> [7/9] Configuring MySQL database..."
+echo "  → Creating database 'jokes_db'"
+echo "  → Creating user 'joke_user' with password"
+echo "  → Granting privileges"
 mysql <<MYSQL_SCRIPT
 CREATE DATABASE IF NOT EXISTS jokes_db;
 CREATE USER IF NOT EXISTS 'joke_user'@'localhost' IDENTIFIED BY 'joke_pass123';
 GRANT ALL PRIVILEGES ON jokes_db.* TO 'joke_user'@'localhost';
 FLUSH PRIVILEGES;
 MYSQL_SCRIPT
+echo "  ✓ MySQL database configured"
+echo ""
 
+# =============================================================================
+# Database Initialization
+# =============================================================================
 # Initialize database with jokes
-echo ">>> Initializing database..."
+echo ">>> [8/9] Initializing database with jokes..."
+echo "  → Running init_db.py to populate jokes table"
 source /opt/joke-app/venv/bin/activate
 python3 init_db.py
 deactivate
 
+# Verify jokes were added
+JOKE_COUNT=$(mysql -u joke_user -pjoke_pass123 jokes_db -sN -e "SELECT COUNT(*) FROM jokes;" 2>/dev/null || echo "0")
+echo "  ✓ Database initialized with $JOKE_COUNT jokes"
+echo ""
+
+# =============================================================================
+# Systemd Service Creation
+# =============================================================================
 # Create systemd service for Flask app
-echo ">>> Creating Flask service..."
+echo ">>> [9/9] Creating and starting systemd service..."
+echo "  → Creating /etc/systemd/system/joke-app.service"
 cat > /etc/systemd/system/joke-app.service <<'SERVICE'
 [Unit]
 Description=Joke-a-Minute Flask Application
@@ -83,11 +169,15 @@ SERVICE
 
 # Start Flask app
 echo ">>> Starting Flask application..."
+echo "  → Reloading systemd daemon"
 systemctl daemon-reload
+echo "  → Starting joke-app service"
 systemctl start joke-app
+echo "  → Enabling joke-app to start on boot"
 systemctl enable joke-app
 
 # Wait for Flask to start
+echo "  → Waiting 5 seconds for service to start..."
 sleep 5
 
 # Check if Flask is running
@@ -99,8 +189,12 @@ else
     exit 1
 fi
 
+# =============================================================================
+# Nginx Configuration
+# =============================================================================
 # Configure Nginx as reverse proxy
-echo ">>> Configuring Nginx..."
+echo ">>> [10/10] Configuring Nginx reverse proxy..."
+echo "  → Creating nginx config for joke-app"
 cat > /etc/nginx/sites-available/joke-app <<'NGINX_CONFIG'
 server {
     listen 80;
@@ -117,27 +211,44 @@ server {
 }
 NGINX_CONFIG
 
+echo "  → Enabling site (creating symlink)"
 ln -sf /etc/nginx/sites-available/joke-app /etc/nginx/sites-enabled/
+echo "  → Removing default nginx site"
 rm -f /etc/nginx/sites-enabled/default
 
+echo "  → Testing nginx configuration"
 nginx -t
+
+echo "  → Restarting nginx"
 systemctl restart nginx
 
+echo "  ✓ Nginx configured and running"
 echo ""
+
+
+# =============================================================================
+# Final Status Report
+# =============================================================================
 echo "========================================="
-echo "   VM Provisioning Complete!"
+echo "   ✅ Vagrant VM Provisioning Complete!"
 echo "========================================="
 echo ""
-echo "✅ All services running in VM!"
+echo "🎉 All services are now running!"
 echo ""
-echo "Service Status:"
-echo "  MySQL:       $(systemctl is-active mysql)"
-echo "  Redis:       $(systemctl is-active redis-server)"
-echo "  Flask App:   $(systemctl is-active joke-app)"
-echo "  Nginx:       $(systemctl is-active nginx)"
+echo "📊 Service Status:"
+echo "  • MySQL:       $(systemctl is-active mysql)"
+echo "  • Redis:       $(systemctl is-active redis-server)"
+echo "  • Flask App:   $(systemctl is-active joke-app)"
+echo "  • Nginx:       $(systemctl is-active nginx)"
 echo ""
-echo "VM is accessible at:"
-echo "  - http://localhost:8080 (from HOST)"
-echo "  - http://localhost:5000 (direct Flask access)"
+echo "🔗 Access Points (from HOST machine):"
+echo "  • Via HOST Nginx: https://devops-vm-43.lrk.si"
+echo "  • Direct to VM:   http://localhost:8080"
+echo "  • Direct Flask:   http://localhost:5000"
 echo ""
+echo "📝 Logs:"
+echo "  • Flask logs: journalctl -u joke-app -f"
+echo "  • Nginx logs: /var/log/nginx/error.log"
+echo ""
+echo "Completed at: $(date)"
 echo "========================================="
