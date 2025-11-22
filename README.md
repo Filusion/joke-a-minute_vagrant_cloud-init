@@ -221,6 +221,18 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
     }
+
+    # GUI access via noVNC (NEW)
+    location /gui/ {
+        proxy_pass http://127.0.0.1:6080/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
 }
 ```
 
@@ -395,6 +407,42 @@ vagrant destroy
 # Destroy and recreate the VM
 vagrant destroy -f && vagrant up
 ```
+
+---
+
+## GUI Access (Browser-based Remote Desktop)
+
+The VM includes a graphical desktop environment accessible through your web browser using noVNC.
+
+### Components Installed
+
+- **XFCE Desktop Environment** - Lightweight Linux desktop interface
+- **TightVNC Server** - VNC server running on display :1 (port 5901)
+- **noVNC** - HTML5 VNC client for browser-based access (port 6080)
+- **GUI Applications**: Firefox, gedit, gnome-terminal
+
+### Accessing the GUI
+
+**From anywhere (via HTTPS):**
+```
+https://devops-vm-43.lrk.si/gui/vnc.html
+```
+
+**Locally (if on the host machine):**
+```
+http://localhost:6080/vnc.html
+```
+
+**Credentials:**
+- Password: `vagrant`
+
+### What You Can Do
+
+Once connected to the GUI desktop, you can:
+- Open Firefox and browse to `http://localhost` to view the Joke app
+- Open a terminal to run commands inside the VM
+- Use gedit to edit files
+- Run any GUI applications installed in the VM
 
 ---
 

@@ -225,6 +225,113 @@ systemctl restart nginx
 echo "  ✓ Nginx configured and running"
 echo ""
 
+# =============================================================================
+# GUI ENVIRONMENT SETUP - noVNC ONLY
+# =============================================================================
+echo "========================================="
+echo "   Installing GUI Environment (noVNC)"
+echo "========================================="
+echo ""
+
+# =============================================================================
+# Desktop Environment Installation
+# =============================================================================
+echo ">>> [11/13] Installing XFCE Desktop Environment..."
+echo "  → Installing xfce4 (lightweight desktop)"
+apt-get install -y xfce4 xfce4-goodies dbus-x11
+echo "  → Installing basic GUI applications"
+apt-get install -y firefox gedit gnome-terminal
+echo "  ✓ Desktop environment installed"
+echo ""
+
+# =============================================================================
+# VNC Server Installation
+# =============================================================================
+echo ">>> [12/13] Installing TightVNC Server..."
+echo "  → Installing tightvncserver"
+apt-get install -y tightvncserver
+echo "  → Creating VNC user directory"
+mkdir -p /home/vagrant/.vnc
+
+# Set VNC password (password: vagrant)
+echo "  → Setting VNC password to 'vagrant'"
+echo -e "vagrant\nvagrant\nn" | vncpasswd -f > /home/vagrant/.vnc/passwd
+chmod 600 /home/vagrant/.vnc/passwd
+
+# Create VNC xstartup script
+cat > /home/vagrant/.vnc/xstartup <<'VNCSTARTUP'
+#!/bin/bash
+xrdb $HOME/.Xresources
+startxfce4 &
+VNCSTARTUP
+
+chmod +x /home/vagrant/.vnc/xstartup
+chown -R vagrant:vagrant /home/vagrant/.vnc
+
+# Create VNC systemd service
+cat > /etc/systemd/system/vncserver@.service <<'VNCSERVICE'
+[Unit]
+Description=TightVNC Server
+After=syslog.target network.target
+
+[Service]
+Type=forking
+User=vagrant
+Group=vagrant
+WorkingDirectory=/home/vagrant
+PIDFile=/home/vagrant/.vnc/%H:%i.pid
+ExecStartPre=-/usr/bin/vncserver -kill :%i > /dev/null 2>&1
+ExecStart=/usr/bin/vncserver -depth 24 -geometry 1280x800 :%i
+ExecStop=/usr/bin/vncserver -kill :%i
+
+[Install]
+WantedBy=multi-user.target
+VNCSERVICE
+
+systemctl daemon-reload
+systemctl enable vncserver@1.service
+systemctl start vncserver@1.service
+
+echo "  ✓ VNC Server running on display :1 (port 5901)"
+echo ""
+
+# =============================================================================
+# noVNC Installation
+# =============================================================================
+echo ">>> [13/13] Installing noVNC (browser-based access)..."
+echo "  → Installing git and dependencies"
+apt-get install -y git python3-numpy
+
+echo "  → Cloning noVNC repository"
+cd /opt
+git clone https://github.com/novnc/noVNC.git
+cd noVNC
+git clone https://github.com/novnc/websockify.git
+
+# Create noVNC systemd service
+cat > /etc/systemd/system/novnc.service <<'NOVNCSERVICE'
+[Unit]
+Description=noVNC Web VNC Client
+After=network.target vncserver@1.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/noVNC/utils/novnc_proxy --vnc localhost:5901 --listen 6080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+NOVNCSERVICE
+
+systemctl daemon-reload
+systemctl enable novnc.service
+systemctl start novnc.service
+
+echo "  ✓ noVNC running on port 6080"
+echo ""
+
 
 # =============================================================================
 # Final Status Report
@@ -245,6 +352,8 @@ echo "🔗 Access Points (from HOST machine):"
 echo "  • Via HOST Nginx: https://devops-vm-43.lrk.si"
 echo "  • Direct to VM:   http://localhost:8080"
 echo "  • Direct Flask:   http://localhost:5000"
+echo "  • GUI (noVNC): http://localhost:6080/vnc.html or https://devops-vm-43.lrk.si/gui/vnc.html"
+echo "     Password: vagrant"
 echo ""
 echo "📝 Logs:"
 echo "  • Flask logs: journalctl -u joke-app -f"
