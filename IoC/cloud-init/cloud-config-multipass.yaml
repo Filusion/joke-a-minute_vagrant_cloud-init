@@ -1,0 +1,305 @@
+#cloud-config
+hostname: joke-app
+fqdn: joke-app.lxd
+
+# Update packages (upgrade disabled for speed)
+package_update: true
+package_upgrade: false
+
+# Install packages in correct order
+packages:
+  - git
+  - curl
+  - python3
+  - python3-pip
+  - python3-venv
+  - mysql-server
+  - redis-server
+  - nginx
+
+write_files:
+  # Systemd service for Flask app
+  - path: /etc/systemd/system/joke-app.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Joke-a-Minute Flask Application
+      After=network.target mysql.service redis-server.service
+      Wants=mysql.service redis-server.service
+      
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/opt/joke-app
+      Environment="PATH=/opt/joke-app/venv/bin"
+      ExecStart=/opt/joke-app/venv/bin/python3 /opt/joke-app/app.py
+      Restart=always
+      RestartSec=10
+      StandardOutput=append:/var/log/joke-app.log
+      StandardError=append:/var/log/joke-app-error.log
+      
+      [Install]
+      WantedBy=multi-user.target
+
+  # Nginx configuration
+  - path: /etc/nginx/sites-available/joke-app
+    permissions: '0644'
+    content: |
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+          server_name _;
+          
+          client_max_body_size 10M;
+          
+          location / {
+              proxy_pass http://127.0.0.1:5000;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+          }
+          
+          location /health {
+              proxy_pass http://127.0.0.1:5000/health;
+              access_log off;
+          }
+      }
+
+  # MySQL configuration
+  - path: /etc/mysql/conf.d/joke-app.cnf
+    permissions: '0644'
+    content: |
+      [mysqld]
+      bind-address = 127.0.0.1
+      skip-networking = 0
+
+  # Setup script
+  - path: /tmp/setup.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      exec > /var/log/joke-app-setup.log 2>&1
+      
+      echo "=========================================="
+      echo "Starting Joke-a-Minute Setup"
+      echo "Time: $(date)"
+      echo "=========================================="
+      
+      # Wait for MySQL to start
+      echo "[1/10] Waiting for MySQL..."
+      systemctl start mysql || true
+      sleep 5
+      
+      for i in {1..30}; do
+          if mysqladmin ping -h localhost --silent 2>/dev/null; then
+              echo "✓ MySQL is ready"
+              break
+          fi
+          echo "Waiting for MySQL... ($i/30)"
+          sleep 2
+      done
+      
+      # Setup MySQL without root password (default in Ubuntu)
+      echo "[2/10] Setting up MySQL database..."
+      mysql -e "CREATE DATABASE IF NOT EXISTS jokes_db;" 2>&1 || echo "DB already exists"
+      mysql -e "CREATE USER IF NOT EXISTS 'joke_user'@'localhost' IDENTIFIED BY 'joke_pass123';" 2>&1 || echo "User already exists"
+      mysql -e "GRANT ALL PRIVILEGES ON jokes_db.* TO 'joke_user'@'localhost';" 2>&1
+      mysql -e "FLUSH PRIVILEGES;" 2>&1
+      echo "✓ MySQL database configured"
+      
+      # Setup Redis
+      echo "[3/10] Configuring Redis..."
+      systemctl start redis-server || true
+      systemctl enable redis-server || true
+      sleep 2
+      if redis-cli ping > /dev/null 2>&1; then
+          echo "✓ Redis is ready"
+      else
+          echo "⚠ Redis not responding"
+      fi
+      
+      # Clone application from GitHub
+      echo "[4/10] Cloning application..."
+      rm -rf /tmp/joke-repo
+      if git clone https://github.com/Filusion/joke-a-minute_vagrant_cloud-init.git /tmp/joke-repo; then
+          echo "✓ Repository cloned"
+          
+          # Copy app files
+          mkdir -p /opt/joke-app
+          if [ -d "/tmp/joke-repo/app" ]; then
+              cp -r /tmp/joke-repo/app/* /opt/joke-app/
+              echo "✓ App files copied from /app directory"
+          else
+              # Try root directory
+              cp /tmp/joke-repo/*.py /opt/joke-app/ 2>/dev/null || true
+              cp /tmp/joke-repo/requirements.txt /opt/joke-app/ 2>/dev/null || true
+              echo "✓ App files copied from root directory"
+          fi
+          
+          ls -la /opt/joke-app/
+      else
+          echo "✗ Git clone failed, cannot continue"
+          exit 1
+      fi
+      
+      # Verify required files exist
+      echo "[5/10] Verifying files..."
+      if [ ! -f "/opt/joke-app/app.py" ]; then
+          echo "✗ app.py not found!"
+          exit 1
+      fi
+      if [ ! -f "/opt/joke-app/requirements.txt" ]; then
+          echo "✗ requirements.txt not found!"
+          exit 1
+      fi
+      if [ ! -f "/opt/joke-app/init_db.py" ]; then
+          echo "✗ init_db.py not found!"
+          exit 1
+      fi
+      echo "✓ All required files present"
+      
+      # Create Python virtual environment
+      echo "[6/10] Setting up Python environment..."
+      cd /opt/joke-app
+      python3 -m venv venv
+      source venv/bin/activate
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      echo "✓ Python packages installed"
+      
+      # Initialize database with jokes
+      echo "[7/10] Initializing database..."
+      python3 init_db.py
+      
+      # Verify jokes were added
+      joke_count=$(mysql -u joke_user -pjoke_pass123 jokes_db -sN -e "SELECT COUNT(*) FROM jokes;" 2>/dev/null || echo "0")
+      echo "✓ Database initialized with $joke_count jokes"
+      
+      # Configure Nginx
+      echo "[8/10] Configuring Nginx..."
+      rm -f /etc/nginx/sites-enabled/default
+      ln -sf /etc/nginx/sites-available/joke-app /etc/nginx/sites-enabled/
+      nginx -t
+      systemctl enable nginx
+      systemctl restart nginx
+      echo "✓ Nginx configured"
+      
+      # Start Flask application
+      echo "[9/10] Starting Flask application..."
+      systemctl daemon-reload
+      systemctl enable joke-app
+      systemctl start joke-app
+      sleep 5
+      
+      # Check service status
+      if systemctl is-active --quiet joke-app; then
+          echo "✓ Joke-app service is running"
+      else
+          echo "✗ Joke-app service failed to start"
+          systemctl status joke-app --no-pager
+          echo "--- App Logs ---"
+          tail -50 /var/log/joke-app-error.log
+          exit 1
+      fi
+      
+      # Test the application
+      echo "[10/10] Testing application..."
+      sleep 3
+      
+      if curl -f http://localhost:5000/health > /dev/null 2>&1; then
+          echo "✓ Flask app health check passed"
+      else
+          echo "⚠ Flask app health check failed (port 5000)"
+      fi
+      
+      if curl -f http://localhost/health > /dev/null 2>&1; then
+          echo "✓ Nginx proxy health check passed"
+      else
+          echo "⚠ Nginx proxy health check failed (port 80)"
+      fi
+      
+      echo ""
+      echo "=========================================="
+      echo "✨ Setup Complete!"
+      echo "=========================================="
+      echo "Services status:"
+      systemctl is-active mysql && echo "  ✓ MySQL: Running" || echo "  ✗ MySQL: Failed"
+      systemctl is-active redis-server && echo "  ✓ Redis: Running" || echo "  ✗ Redis: Failed"
+      systemctl is-active nginx && echo "  ✓ Nginx: Running" || echo "  ✗ Nginx: Failed"
+      systemctl is-active joke-app && echo "  ✓ Joke-App: Running" || echo "  ✗ Joke-App: Failed"
+      echo ""
+      echo "Access the app at: http://$(hostname -I | awk '{print $1}')"
+      echo "Logs: /var/log/joke-app-setup.log"
+      echo "=========================================="
+
+# Run commands after packages are installed
+runcmd:
+  # Run the setup script
+  - /tmp/setup.sh
+  
+  # Install and configure mkcert for HTTPS
+  - curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+  - chmod +x mkcert-v*-linux-amd64
+  - cp mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+  - CAROOT=/root/.local/share/mkcert mkcert -install
+  - cd /etc/ssl/certs && CAROOT=/root/.local/share/mkcert mkcert -cert-file nginx.crt -key-file /etc/ssl/private/nginx.key localhost 127.0.0.1 $(hostname -I | awk '{print $1}')
+  
+  # Configure nginx for HTTPS
+  - |
+    cat > /etc/nginx/sites-available/joke-app-ssl <<'EOF'
+    server {
+        listen 443 ssl default_server;
+        listen [::]:443 ssl default_server;
+        
+        ssl_certificate /etc/ssl/certs/nginx.crt;
+        ssl_certificate_key /etc/ssl/private/nginx.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers on;
+        
+        server_name _;
+        client_max_body_size 10M;
+        
+        location / {
+            proxy_pass http://127.0.0.1:5000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+        }
+        
+        location /health {
+            proxy_pass http://127.0.0.1:5000/health;
+            access_log off;
+        }
+    }
+    
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        return 301 https://$host$request_uri;
+    }
+    EOF
+  
+  # Enable SSL config
+  - rm -f /etc/nginx/sites-enabled/joke-app
+  - ln -sf /etc/nginx/sites-available/joke-app-ssl /etc/nginx/sites-enabled/joke-app-ssl
+  - nginx -t && systemctl reload nginx
+
+final_message: |
+  ========================================
+  🎉 Cloud-Init Complete!
+  ========================================
+  Check logs:
+    - Setup: /var/log/joke-app-setup.log
+    - App stdout: /var/log/joke-app.log
+    - App errors: /var/log/joke-app-error.log
+    - Cloud-init: /var/log/cloud-init-output.log
+  ========================================
